@@ -1,24 +1,19 @@
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
 
 use nom::ParseTo;
+use threadpool::ThreadPool;
 
 use crate::response::HttpResponse;
 use crate::route::Router;
 
 use crate::request::parse_stream;
 
-fn flush_stream(stream: &mut TcpStream) {
-    match stream.flush() {
-        Ok(_) => (),
-        Err(_) => eprintln!("An error occured when flushing stream"),
-    }
-}
-
 pub struct Server {
     port: u32,
     host: String,
-    router: Router,
+    router: Arc<Router>,
 }
 
 impl Server {
@@ -26,7 +21,7 @@ impl Server {
         return Server {
             port,
             host,
-            router: Router::new(),
+            router: Arc::new(Router::new()),
         };
     }
 
@@ -37,8 +32,8 @@ impl Server {
         }
     }
 
-    pub fn router(&mut self) -> &mut Router {
-        return &mut self.router;
+    pub fn use_router(&mut self, router: Router) {
+        self.router = Arc::new(router);
     }
 
     fn address(&self) -> String {
@@ -50,34 +45,41 @@ impl Server {
     {
         let listener = TcpListener::bind(self.address()).unwrap();
         cb();
+        let pool = ThreadPool::new(4);
         for raw_stream in listener.incoming() {
+            let router = self.router.clone();
             match raw_stream {
-                Ok(mut stream) => {
-                    self.process_stream(&mut stream);
-                }
+                Ok(mut stream) => pool.execute(move || process_stream(router, &mut stream)),
                 Err(e) => {
                     println!("error: {}", e);
                 }
             }
         }
     }
+}
 
-    fn write_response(&self, response: HttpResponse, stream: &mut TcpStream) {
-        match response.write(stream) {
-            Ok(_) => (),
-            Err(e) => eprintln!("error: {}", e),
-        }
+fn write_response(response: HttpResponse, stream: &mut TcpStream) {
+    match response.write(stream) {
+        Ok(_) => (),
+        Err(e) => eprintln!("error: {}", e),
     }
-    fn process_stream(&self, stream: &mut TcpStream) {
-        match parse_stream(stream) {
-            Ok(context) => {
-                let response = self.router.handle(context);
-                self.write_response(response, stream);
-                flush_stream(stream);
-            }
-            Err(e) => eprintln!("stream error: {}", e),
+}
+fn process_stream(router: Arc<Router>, stream: &mut TcpStream) {
+    match parse_stream(stream) {
+        Ok(context) => {
+            let response = router.handle(context);
+            write_response(response, stream);
+            flush_stream(stream);
         }
+        Err(e) => eprintln!("stream error: {}", e),
+    }
 
-        let _ = stream.shutdown(std::net::Shutdown::Both);
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+fn flush_stream(stream: &mut TcpStream) {
+    match stream.flush() {
+        Ok(_) => (),
+        Err(_) => eprintln!("An error occured when flushing stream"),
     }
 }

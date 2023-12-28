@@ -71,7 +71,6 @@ impl HttpResponse {
         };
     }
     pub fn write(&self, stream: &mut TcpStream) -> Result<(), std::io::Error> {
-        println!("status {}", self.status_code.as_str());
         self.write_status(stream)?;
         self.write_headers(stream)?;
         self.write_body(stream)

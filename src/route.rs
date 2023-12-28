@@ -89,8 +89,8 @@ fn build_paths(path: String) -> Vec<HTTPPath> {
 }
 
 struct RouteMiddleware {
-    pre_request_handlers: Vec<Box<dyn PreRequestMiddleware>>,
-    post_request_handlers: Vec<Box<dyn PostRequestMiddleware>>,
+    pre_request_handlers: Vec<Box<dyn PreRequestMiddleware + Sync + Send>>,
+    post_request_handlers: Vec<Box<dyn PostRequestMiddleware + Sync + Send>>,
 }
 
 impl RouteMiddleware {
@@ -121,13 +121,13 @@ impl RouteMiddleware {
 }
 
 struct RouteHandler {
-    inner_handler: Option<Box<dyn Fn(&mut HTTPRequest) -> HttpResponse>>,
+    inner_handler: Option<Box<dyn Fn(&mut HTTPRequest) -> HttpResponse + Sync + Send>>,
 }
 
 impl RouteHandler {
     fn new<T>(inner_handler: T) -> Self
     where
-        T: Fn(&mut HTTPRequest) -> HttpResponse + 'static,
+        T: Fn(&mut HTTPRequest) -> HttpResponse + 'static + Sync + Send,
     {
         return RouteHandler {
             inner_handler: Some(Box::new(inner_handler)),
@@ -152,7 +152,7 @@ pub struct RouteMapping {
 impl RouteMapping {
     fn new<T>(method: Option<HTTPMethod>, path: String, handler: T) -> Self
     where
-        T: Fn(&mut HTTPRequest) -> HttpResponse + 'static,
+        T: Fn(&mut HTTPRequest) -> HttpResponse + 'static + Sync + Send,
     {
         return RouteMapping {
             method,
@@ -171,7 +171,10 @@ impl RouteMapping {
         };
     }
 
-    fn add_post_request_middleware(&mut self, post_request: Box<dyn PostRequestMiddleware>) {
+    fn add_post_request_middleware(
+        &mut self,
+        post_request: Box<dyn PostRequestMiddleware + Sync + Send>,
+    ) {
         if self.middleware.is_none() {
             self.middleware = Some(RouteMiddleware {
                 pre_request_handlers: vec![],
@@ -183,7 +186,10 @@ impl RouteMapping {
         }
     }
 
-    fn add_pre_request_middleware(&mut self, pre_request: Box<dyn PreRequestMiddleware>) {
+    fn add_pre_request_middleware(
+        &mut self,
+        pre_request: Box<dyn PreRequestMiddleware + Sync + Send>,
+    ) {
         if self.middleware.is_none() {
             self.middleware = Some(RouteMiddleware {
                 pre_request_handlers: vec![pre_request],
@@ -272,7 +278,7 @@ impl Router {
 
     pub fn route<T>(&mut self, method: HTTPMethod, path: &str, handler: T) -> &mut Self
     where
-        T: Fn(&mut HTTPRequest) -> HttpResponse + 'static,
+        T: Fn(&mut HTTPRequest) -> HttpResponse + 'static + Sync + Send,
     {
         self.routes
             .push(RouteMapping::new(method.into(), path.to_string(), handler));
@@ -286,7 +292,7 @@ impl Router {
 
     pub fn before<T>(&mut self, path: &str, middleware: T) -> &mut Self
     where
-        T: PreRequestMiddleware + 'static,
+        T: PreRequestMiddleware + 'static + Sync + Send,
     {
         let mapping = self
             .routes
@@ -306,7 +312,7 @@ impl Router {
 
     pub fn after<T>(&mut self, path: &str, middleware: T) -> &mut Self
     where
-        T: PostRequestMiddleware + 'static,
+        T: PostRequestMiddleware + 'static + Sync + Send,
     {
         let mapping = self
             .routes
