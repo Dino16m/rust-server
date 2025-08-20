@@ -340,6 +340,7 @@ impl Router {
             let handler_response = handler.handle(request);
             if handler_response.is_some() {
                 response = handler_response;
+                break;
             }
         }
 
