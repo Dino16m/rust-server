@@ -1,5 +1,8 @@
 use std::io::{BufRead, BufReader, Read};
 use std::net::TcpStream;
+use std::os::macos::raw;
+
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 
 #[derive(Debug, PartialEq)]
 pub enum HTTPMethod {
@@ -52,6 +55,7 @@ pub struct HTTPContext {
     pub path: String,
     pub queries: Vec<HTTPQuery>,
     pub body: Option<String>,
+    pub body_bytes: Option<Vec<u8>>,
 }
 
 fn to_header(pair: Option<(&str, &str)>) -> Option<HTTPHeader> {
@@ -90,7 +94,7 @@ fn parse_path(raw_path: &str) -> (&str, Vec<&str>) {
     return (parts[0], queries);
 }
 
-fn build_request(raw_headers: &String, raw_body: &String) -> Option<HTTPContext> {
+fn build_request(raw_headers: &String, raw_body_bytes: Vec<u8>) -> Option<HTTPContext> {
     let request_lines: Vec<_> = raw_headers.split("\r\n").collect();
     let start = request_lines.first();
     if start.is_none() {
@@ -108,8 +112,13 @@ fn build_request(raw_headers: &String, raw_body: &String) -> Option<HTTPContext>
     let http_version = start_parts[2];
     let headers = parse_headers(request_lines[1..].iter());
     let mut body = None;
+    let raw_body = String::from_utf8_lossy(&raw_body_bytes).to_string();
     if raw_body.trim().len() > 0 {
         body = Some(raw_body.trim().to_string());
+    }
+    let mut body_bytes = None;
+    if raw_body_bytes.len() > 0 {
+        body_bytes = Some(raw_body_bytes);
     }
     return Some(HTTPContext {
         method: method.into(),
@@ -117,6 +126,7 @@ fn build_request(raw_headers: &String, raw_body: &String) -> Option<HTTPContext>
         headers,
         queries,
         body,
+        body_bytes: body_bytes,
         path: path.to_string(),
     });
 }
@@ -127,9 +137,46 @@ fn get_content_length(header: &str) -> usize {
         None => 0,
     };
 }
+async fn read_stream_async(stream: &mut tokio::net::TcpStream) -> Option<(String, Vec<u8>)>
+{
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut raw_headers = String::new();
+    let mut content_length = 0;
+    const MIN_LINE_LENGTH: usize = 3;
 
-fn read_stream(stream: &mut TcpStream) -> Option<(String, String)> {
-    let mut reader = BufReader::new(stream);
+    loop {
+        match reader.read_line(&mut raw_headers).await {
+            Ok(size) => {
+                if size < MIN_LINE_LENGTH {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    for line in raw_headers.lines() {
+        if line.to_lowercase().contains("content-length")  {
+            content_length = get_content_length(line);
+        }
+    }
+
+    let mut buffer = vec![0; content_length];
+    match reader.read_exact(&mut buffer).await {
+        Ok(size) => {
+            return Some((
+                raw_headers.trim().to_string(),
+                buffer,
+            ))
+        }
+        Err(_) => return None,
+    }
+}
+
+fn read_stream<TStream>(reader: &mut BufReader<TStream>) -> Option<(String, Vec<u8>)>
+where
+    TStream: std::io::Read
+{
+    // let mut reader = BufReader::new(stream);
     let mut raw_headers = String::new();
     let mut content_length = 0;
     const MIN_LINE_LENGTH: usize = 3;
@@ -144,7 +191,7 @@ fn read_stream(stream: &mut TcpStream) -> Option<(String, String)> {
         }
     }
     for line in raw_headers.lines() {
-        if line.contains("Content-Length") {
+        if line.to_lowercase().contains("content-length") {
             content_length = get_content_length(line);
         }
     }
@@ -155,20 +202,32 @@ fn read_stream(stream: &mut TcpStream) -> Option<(String, String)> {
         Ok(_) => {
             return Some((
                 raw_headers.trim().to_string(),
-                String::from_utf8_lossy(&buffer).to_string(),
+                buffer,
             ))
         }
         Err(_) => return None,
     }
 }
 
-pub fn parse_stream(stream: &mut TcpStream) -> Result<HTTPContext, String> {
-    let request_parts = read_stream(stream);
+pub async  fn parse_stream_async(stream: &mut tokio::net::TcpStream) -> Result<HTTPContext, String> {
+    let request_parts = read_stream_async(stream).await;
     if request_parts.is_none() {
         return Err("Failed to read lines".to_string());
     }
     let (raw_headers, raw_body) = request_parts.unwrap();
-    match build_request(&raw_headers, &raw_body) {
+    match build_request(&raw_headers, raw_body) {
+        Some(context) => Ok(context),
+        None => Err("Could not read request ".to_string()),
+    }
+}
+pub fn parse_stream(stream: &mut TcpStream) -> Result<HTTPContext, String> {
+    let mut reader = BufReader::new(stream);
+    let request_parts = read_stream(&mut reader);
+    if request_parts.is_none() {
+        return Err("Failed to read lines".to_string());
+    }
+    let (raw_headers, raw_body) = request_parts.unwrap();
+    match build_request(&raw_headers, raw_body) {
         Some(context) => Ok(context),
         None => Err("Could not read request ".to_string()),
     }
